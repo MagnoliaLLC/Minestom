@@ -57,6 +57,18 @@ publishing.publications.create<MavenPublication>("maven") {
     }
 }
 
+publishing.repositories {
+    maven {
+        name = "gritter"
+        val base = "https://repo.gritter.nl"
+        url = uri(if (version.toString().endsWith("-SNAPSHOT")) "$base/snapshots" else "$base/releases")
+        credentials {
+            username = providers.gradleProperty("gritterUser").orNull
+            password = providers.gradleProperty("gritterPassword").orNull
+        }
+    }
+}
+
 signing {
     isRequired = System.getenv("CI") != null
 
