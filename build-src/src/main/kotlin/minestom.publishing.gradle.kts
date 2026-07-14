@@ -70,7 +70,7 @@ publishing.repositories {
 }
 
 signing {
-    isRequired = System.getenv("CI") != null
+    isRequired = System.getenv("GPG_PRIVATE_KEY") != null
 
     val privateKey = System.getenv("GPG_PRIVATE_KEY")
     val keyPassphrase = System.getenv()["GPG_PASSPHRASE"]

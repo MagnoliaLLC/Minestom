@@ -8,11 +8,13 @@ val javaVersion = System.getenv("JAVA_VERSION") ?: "25"
 group = "net.minestom"
 version = System.getenv("MINESTOM_VERSION") ?: run {
     val mcVersion = (libs.minestomData.get().version ?: "unknown").substringBefore("-")
-    val commitHash = providers.exec {
+    // In CI we publish a monotonically increasing build number so version sorting
+    // (Renovate, Maven) is well-defined. Locally we fall back to the commit hash.
+    val suffix = System.getenv("BUILD_NUMBER") ?: providers.exec {
         commandLine("git", "rev-parse", "--short=8", "HEAD")
         isIgnoreExitValue = true
     }.standardOutput.asText.map { it.trim() }.getOrElse("nogit")
-    "$mcVersion-$commitHash"
+    "$mcVersion-$suffix"
 }
 
 configurations.all {
