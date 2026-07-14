@@ -6,7 +6,14 @@ plugins {
 val javaVersion = System.getenv("JAVA_VERSION") ?: "25"
 
 group = "net.minestom"
-version = System.getenv("MINESTOM_VERSION") ?: "dev"
+version = System.getenv("MINESTOM_VERSION") ?: run {
+    val mcVersion = (libs.minestomData.get().version ?: "unknown").substringBefore("-")
+    val commitHash = providers.exec {
+        commandLine("git", "rev-parse", "--short=8", "HEAD")
+        isIgnoreExitValue = true
+    }.standardOutput.asText.map { it.trim() }.getOrElse("nogit")
+    "$mcVersion-$commitHash"
+}
 
 configurations.all {
     // We only use Jetbrains Annotations
