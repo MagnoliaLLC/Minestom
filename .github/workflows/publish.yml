@@ -1,0 +1,41 @@
+name: Publish
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch: { }
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to repo.gritter.nl
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Publish
+        env:
+          ORG_GRADLE_PROJECT_gritterUser: ${{ secrets.GRITTER_USER }}
+          ORG_GRADLE_PROJECT_gritterPassword: ${{ secrets.GRITTER_PASSWORD }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          ./gradlew :publishMavenPublicationToGritterRepository \
+                    :testing:publishMavenPublicationToGritterRepository
+          VERSION="$(./gradlew -q :properties | grep '^version:' | awk '{print $2}')"
+          echo "Version: $VERSION (commit ${GITHUB_SHA::8})" >> "$GITHUB_STEP_SUMMARY"
