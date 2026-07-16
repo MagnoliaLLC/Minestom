@@ -21,6 +21,8 @@ import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.UnknownNullability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -30,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @ApiStatus.Internal
 final class DynamicRegistryImpl<T> implements DynamicRegistry<T> {
+    private static final Logger LOGGER = LoggerFactory.getLogger(DynamicRegistryImpl.class);
     private static final String UNSAFE_REMOVE_MESSAGE = "Unsafe remove is disabled. Enable by setting the system property 'minestom.registry.unsafe-ops' to 'true'";
     // Could also just use `this`, but this is a good candidate for identityless classes.
     // Also, what use case requires you to mutate registries faster than one monitor?
@@ -44,6 +47,12 @@ final class DynamicRegistryImpl<T> implements DynamicRegistry<T> {
     private final Map<Key, T> keyToValue;
     private final Map<T, RegistryKey<T>> valueToKey;
     private final List<DataPack> packById;
+
+    // Verbatim NBT to emit for entries grafted by RegistryDataOverride, keyed by entry key. The source
+    // backend's NBT is kept as-is because this registry's codec does not necessarily re-encode to the
+    // same bytes (field order / optional fields differ), which would break the proxy's byte-for-byte
+    // fingerprint. Empty in normal operation. Only populated by reorderToMatch.
+    private final Map<Key, BinaryTag> overrideEntryNbt = new HashMap<>();
 
     private final Map<TagKey<T>, RegistryTagImpl.Backed<T>> tags;
 
@@ -259,7 +268,126 @@ final class DynamicRegistryImpl<T> implements DynamicRegistry<T> {
         return new TagsPacket.Registry(key().asString(), tagList);
     }
 
-    private RegistryDataPacket createRegistryDataPacket(Registries registries, boolean excludeVanilla) {
+    /**
+     * Rebuilds this registry so its id order and wire output exactly match {@code orderedEntries} (the
+     * entries of a registry-data packet another backend sent). Used to make a Minestom hub advertise a
+     * backend's precise registry set so the proxy can skip client reconfiguration (see
+     * {@link RegistryDataOverride}).
+     *
+     * <p>Everything that goes on the wire is taken verbatim from the entries — the id order, which
+     * entries are omitted, and the exact NBT bytes — so this is agnostic to how the backend orders or
+     * serializes its registries (no dependency on vanilla's alphabetical sort or this registry's codec
+     * field order, either of which could change). For each entry, in order:</p>
+     * <ul>
+     *   <li>with NBT — the NBT is stored verbatim ({@link #overrideEntryNbt}) and emitted as-is under a
+     *       non-{@link DataPack#MINECRAFT_CORE} pack, so it is always sent in full;</li>
+     *   <li>without NBT — reused under {@link DataPack#MINECRAFT_CORE}, so it is omitted for clients that
+     *       know the vanilla pack, exactly as the backend omitted it.</li>
+     * </ul>
+     *
+     * <p>The typed value stored per id is only used server-side (never re-encoded for the wire): this
+     * registry's existing value is reused when the key is one it already had, otherwise a placeholder is
+     * used (custom entries are advertised to the client but never placed by a hub). Entries this
+     * registry has that the override does not mention are appended afterwards (the backend is expected to
+     * be a superset). Tags are left untouched — they reference keys, not ids.</p>
+     *
+     * @throws IllegalStateException if an omitted entry has no existing value to reuse, or a new entry
+     *                               must be grafted into an empty registry (no placeholder available)
+     */
+    @ApiStatus.Internal
+    void reorderToMatch(List<RegistryDataPacket.Entry> orderedEntries) {
+        final List<T> newIdToValue = new ArrayList<>(orderedEntries.size());
+        final List<RegistryKey<T>> newIdToKey = new ArrayList<>(orderedEntries.size());
+        final Map<RegistryKey<T>, Integer> newKeyToId = new HashMap<>();
+        final Map<Key, T> newKeyToValue = new HashMap<>();
+        final Map<T, RegistryKey<T>> newValueToKey = new HashMap<>();
+        final List<DataPack> newPackById = new ArrayList<>(orderedEntries.size());
+        final Map<Key, BinaryTag> newOverrideNbt = new HashMap<>();
+        final Set<Key> seen = new HashSet<>();
+        // Any real value works as a filler for custom entries: they are never placed server-side, only
+        // advertised to the client (whose bytes come from the verbatim NBT, not from this value).
+        final T placeholder = idToValue.isEmpty() ? null : idToValue.get(0);
+
+        for (RegistryDataPacket.Entry entry : orderedEntries) {
+            final Key entryKey = Key.key(entry.id());
+            if (!seen.add(entryKey)) {
+                throw new IllegalStateException("Duplicate entry " + entryKey + " in override for registry " + key);
+            }
+            final T existing = keyToValue.get(entryKey);
+            final T value;
+            final DataPack pack;
+            final boolean mapValueToKey;
+            if (entry.data() != null) {
+                newOverrideNbt.put(entryKey, entry.data());
+                pack = DataPack.MINESTOM_UNNAMED;
+                if (existing != null) {
+                    value = existing;
+                    mapValueToKey = true;
+                } else if (placeholder != null) {
+                    value = placeholder; // filler; do not pollute valueToKey with it
+                    mapValueToKey = false;
+                } else {
+                    throw new IllegalStateException("Cannot graft " + entryKey + " into empty registry " + key);
+                }
+            } else {
+                if (existing == null) {
+                    throw new IllegalStateException("Override omits data for " + entryKey + " in registry "
+                            + key + " but Minestom has no such entry to reuse");
+                }
+                value = existing;
+                pack = DataPack.MINECRAFT_CORE;
+                mapValueToKey = true;
+            }
+            appendTo(newIdToValue, newIdToKey, newKeyToId, newKeyToValue, newValueToKey, newPackById,
+                    entryKey, value, pack, mapValueToKey);
+        }
+
+        for (int i = 0; i < idToKey.size(); i++) {
+            final RegistryKey<T> existingKey = idToKey.get(i);
+            if (seen.contains(existingKey.key())) {
+                continue;
+            }
+            LOGGER.warn("Registry {}: entry {} is not in the override; appending it (fast switch will not match)",
+                    key, existingKey.key());
+            appendTo(newIdToValue, newIdToKey, newKeyToId, newKeyToValue, newValueToKey, newPackById,
+                    existingKey.key(), idToValue.get(i), packById.get(i), true);
+        }
+
+        synchronized (REGISTRY_LOCK) {
+            idToValue.clear();
+            idToValue.addAll(newIdToValue);
+            idToKey.clear();
+            idToKey.addAll(newIdToKey);
+            keyToId.clear();
+            keyToId.putAll(newKeyToId);
+            keyToValue.clear();
+            keyToValue.putAll(newKeyToValue);
+            valueToKey.clear();
+            valueToKey.putAll(newValueToKey);
+            packById.clear();
+            packById.addAll(newPackById);
+            overrideEntryNbt.clear();
+            overrideEntryNbt.putAll(newOverrideNbt);
+            vanillaRegistryDataPacket.invalidate();
+        }
+    }
+
+    private void appendTo(List<T> idToValue, List<RegistryKey<T>> idToKey, Map<RegistryKey<T>, Integer> keyToId,
+                          Map<Key, T> keyToValue, Map<T, RegistryKey<T>> valueToKey, List<DataPack> packById,
+                          Key entryKey, T value, DataPack pack, boolean mapValueToKey) {
+        final int id = idToValue.size();
+        final RegistryKey<T> registryKey = new RegistryKeyImpl<>(entryKey);
+        idToValue.add(value);
+        idToKey.add(registryKey);
+        keyToId.put(registryKey, id);
+        keyToValue.put(entryKey, value);
+        if (mapValueToKey) {
+            valueToKey.put(value, registryKey);
+        }
+        packById.add(pack);
+    }
+
+    RegistryDataPacket createRegistryDataPacket(Registries registries, boolean excludeVanilla) {
         Objects.requireNonNull(codec, "Cannot create registry data packet for server-only registry");
         Transcoder<BinaryTag> transcoder = new RegistryTranscoder<>(Transcoder.NBT, registries);
         // Copy to avoid concurrent modification issues while iterating, as we are not synchronized on the registry
@@ -288,11 +416,18 @@ final class DynamicRegistryImpl<T> implements DynamicRegistry<T> {
             T entry = idToValue.get(i);
             DataPack pack = packById.get(i);
             if (!excludeVanilla || pack != DataPack.MINECRAFT_CORE) {
-                final Result<BinaryTag> entryResult = codec.encode(transcoder, entry);
-                if (entryResult instanceof Result.Ok(BinaryTag tag)) {
-                    data = (CompoundBinaryTag) tag;
+                final BinaryTag override = overrideEntryNbt.get(getKey(i).key());
+                if (override != null) {
+                    // Verbatim NBT grafted from another backend; emit as-is rather than re-encoding, so
+                    // the bytes match the backend exactly (see reorderToMatch). Empty in normal operation.
+                    data = (CompoundBinaryTag) override;
                 } else {
-                    throw new IllegalStateException("Failed to encode registry entry " + i + " (" + getKey(i) + ") for registry " + key);
+                    final Result<BinaryTag> entryResult = codec.encode(transcoder, entry);
+                    if (entryResult instanceof Result.Ok(BinaryTag tag)) {
+                        data = (CompoundBinaryTag) tag;
+                    } else {
+                        throw new IllegalStateException("Failed to encode registry entry " + i + " (" + getKey(i) + ") for registry " + key);
+                    }
                 }
             }
             //noinspection DataFlowIssue

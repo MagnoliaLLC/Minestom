@@ -26,7 +26,7 @@ final class RegistriesImpl {
         return new TagsPacket(entries);
     }
 
-    private static List<DynamicRegistry<?>> configurationRegistries(Registries registries) {
+    static List<DynamicRegistry<?>> configurationRegistries(Registries registries) {
         return List.of(
                 registries.chatType(),
                 registries.biome(),

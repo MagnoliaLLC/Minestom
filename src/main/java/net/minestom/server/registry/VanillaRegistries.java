@@ -104,6 +104,11 @@ final class VanillaRegistries implements Registries {
         for (var entry: material().values()) {
             entry.registry().bindComponents(this);
         }
+
+        // Velocity-CTD: graft a backend's extra registry entries (e.g. a Paper custom world generator's
+        // biomes) into these registries so Minestom advertises the backend's exact registry set, letting
+        // the proxy's fast server-switch skip client reconfiguration. No-op unless configured.
+        RegistryDataOverride.augment(this);
     }
 
     @Override

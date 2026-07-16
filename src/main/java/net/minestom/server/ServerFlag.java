@@ -78,6 +78,10 @@ public final class ServerFlag {
     public static final boolean PROXY_PROTOCOL = booleanProperty("minestom.proxy-protocol", false);
     public static final boolean PROXY_PROTOCOL_REQUIRED = booleanProperty("minestom.proxy-protocol.required", false);
 
+    // Directory of Velocity-CTD registry-data dumps (NN-R-*.bin) to replay verbatim during
+    // configuration in place of Minestom's own registries. See RegistryDataOverride. Unset by default.
+    public static final @Nullable String REGISTRY_DATA_OVERRIDE_DIR = stringProperty("minestom.registry-data-override-dir");
+
     @SuppressWarnings("ConstantField") // kept not final for binary compatibility until the next breaking release
     public static boolean INSIDE_TEST = booleanProperty("minestom.inside-test", false);
 
