@@ -387,6 +387,40 @@ final class DynamicRegistryImpl<T> implements DynamicRegistry<T> {
         packById.add(pack);
     }
 
+    /**
+     * Replaces this registry's tags with {@code orderedTags} (the tags a backend sent for this
+     * registry), so a Minestom hub advertises the backend's exact tag set. Companion to
+     * {@link #reorderToMatch}: because that method has already made this registry's id order match the
+     * backend's, the entry ids carried in each tag resolve to the same keys the backend meant. Used by
+     * {@link RegistryDataOverride} for tag registries the proxy folds into its fast-switch fingerprint
+     * (currently {@code minecraft:dialog}, whose {@code pause_screen_additions} decides whether a
+     * backend's custom pause-menu buttons show).
+     *
+     * @throws IllegalStateException if a tag references an id this registry does not have (which would
+     *                               mean {@link #reorderToMatch} was not applied, or the dumps are
+     *                               inconsistent)
+     */
+    @ApiStatus.Internal
+    void overrideTags(List<TagsPacket.Tag> orderedTags) {
+        final Map<TagKey<T>, RegistryTagImpl.Backed<T>> newTags = new HashMap<>();
+        for (TagsPacket.Tag tag : orderedTags) {
+            final TagKey<T> tagKey = TagKey.unsafeOf(Key.key(tag.identifier()));
+            final RegistryTagImpl.Backed<T> backed = new RegistryTagImpl.Backed<>(tagKey);
+            for (int id : tag.entries()) {
+                if (id < 0 || id >= idToKey.size()) {
+                    throw new IllegalStateException("Tag " + tag.identifier() + " references out-of-range id "
+                            + id + " in registry " + key);
+                }
+                backed.add(idToKey.get(id));
+            }
+            newTags.put(tagKey, backed);
+        }
+        synchronized (REGISTRY_LOCK) {
+            tags.clear();
+            tags.putAll(newTags);
+        }
+    }
+
     RegistryDataPacket createRegistryDataPacket(Registries registries, boolean excludeVanilla) {
         Objects.requireNonNull(codec, "Cannot create registry data packet for server-only registry");
         Transcoder<BinaryTag> transcoder = new RegistryTranscoder<>(Transcoder.NBT, registries);
